@@ -663,7 +663,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
             <div class="field"><label>Color <span id="p-color-name" class="swatch-count"></span></label><div class="swatches small" id="p-swatches"></div></div>
             <button type="button" class="btn btn-chrome" id="p-analyze" disabled>Generate again with AI</button>
             <p class="ai-status" id="p-status" role="status"></p>
-            <div class="field"><label for="p-sqft">Floor area (sq ft)</label><input id="p-sqft" type="number" min="50" step="10" placeholder="Measured by AI, or type it in"></div>
+            <div class="field"><label for="p-sqft">Floor area (sq ft)</label><input id="p-sqft" type="number" min="50" step="10" placeholder="Estimated from your photo, or type it in"></div>
             <div class="field"><label for="p-cond">Concrete condition</label>
               <select id="p-cond"><option value="good">Good</option><option value="fair" selected>Fair</option><option value="poor">Rough</option></select>
             </div>
@@ -1584,78 +1584,184 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     let topRow = fh; for (let i = 0; i < n; i++) if (out[i]) { topRow = (i / fw) | 0; break; }
     return { m: topRow > fh * .3 ? out : null, fw, fh }; // reaching the top third means it ran up a wall
   }
-  // turn a small 0/1 mask into the soft full-size mask, and fit the floor's perspective to it
-  function useMask(m, fw, fh) {
+  // The floor runs from its far edge (where it meets the walls) all the way to the camera. Find that far edge
+  // column by column, cover everything below it, and leave out only real objects standing on it (cars, cabinets).
+  // Reflections in a shiny floor or stains don't stop the coverage.
+  function floorLine(m, fw, fh, obj) {
+    // keep the floor that's connected to the bottom of the photo
+    // objects standing on the floor count as floor here, so the line runs behind a parked car instead of under it
+    const fl = obj ? m.map((v, i) => v | obj[i]) : m;
+    const keep = new Uint8Array(fw * fh), st = [];
+    for (let y = Math.floor(fh * .6); y < fh; y++) for (let x = 0; x < fw; x++) if (m[y * fw + x]) st.push(y * fw + x);
+    while (st.length) { const i = st.pop(); if (keep[i] || !fl[i]) continue; keep[i] = 1; const x = i % fw, y = (i / fw) | 0;
+      if (x > 0) st.push(i - 1); if (x < fw - 1) st.push(i + 1); if (y > 0) st.push(i - fw); if (y < fh - 1) st.push(i + fw); }
+    const top = new Float32Array(fw).fill(Infinity);
+    for (let x = 0; x < fw; x++) for (let y = 0; y < fh; y++) if (keep[y * fw + x]) { top[x] = y; break; }
+    if (obj) { // ...but a tall object can't lift the line above the floor's real back edge
+      const ft = []; for (let x = 0; x < fw; x++) for (let y = 0; y < fh; y++) if (keep[y * fw + x] && m[y * fw + x]) { ft.push(y); break; }
+      ft.sort((a, b) => a - b); const back = ft[Math.floor(ft.length * .2)];
+      if (back !== undefined) for (let x = 0; x < fw; x++) if (top[x] < back) top[x] = back;
+    }
+    // upper envelope over a small window (a shadow or white streak doesn't dent the line), then a median to drop spikes
+    const k1 = Math.max(1, Math.round(fw / 40)), k2 = Math.max(2, Math.round(fw / 16));
+    const env = top.map((_, x) => { let v = Infinity; for (let d = -k1; d <= k1; d++) { const t = top[x + d]; if (t !== undefined && t < v) v = t; } return v; });
+    const line = env.map((_, x) => { const w = []; for (let d = -k2; d <= k2; d++) { const t = env[x + d]; if (t !== undefined) w.push(t); }
+      w.sort((a, b) => a - b); return w[w.length >> 1]; });
+    // bridge short gaps where something blocks the view of the floor's edge
+    for (let x = 0; x < fw; x++) if (!isFinite(line[x])) {
+      let a = x - 1; while (a >= 0 && !isFinite(line[a])) a--;
+      let b = x + 1; while (b < fw && !isFinite(line[b])) b++;
+      if (a >= 0 && b < fw && b - a < fw * .35) line[x] = line[a] + (line[b] - line[a]) * (x - a) / (b - a);
+    }
+    return line;
+  }
+  function applyFloor(m, fw, fh, obj, ceil) {
     if (!m) return false;
-    let area = 0; for (let i = 0; i < m.length; i++) area += m[i];
-    if (area < m.length * .04) return false;
+    const line = floorLine(m, fw, fh, obj);
+    const cover = new Uint8Array(fw * fh), under = new Uint8Array(fw * fh);
+    let area = 0;
+    for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) if (y >= line[x]) { const i = y * fw + x; under[i] = 1; area++; cover[i] = obj && obj[i] ? 0 : 1; }
+    if (area < fw * fh * .06) return false;
+    if (obj) { // tiny "objects" are noise; keep only ones big enough to be a car, cabinet or box
+      const seen = new Uint8Array(fw * fh);
+      for (let i = 0; i < cover.length; i++) if (under[i] && !cover[i] && !seen[i]) {
+        const blob = [i], q = [i]; seen[i] = 1;
+        while (q.length) { const j = q.pop(), x = j % fw, y = (j / fw) | 0;
+          for (const n of [x > 0 ? j - 1 : -1, x < fw - 1 ? j + 1 : -1, y > 0 ? j - fw : -1, y < fh - 1 ? j + fw : -1])
+            if (n >= 0 && !seen[n] && under[n] && !cover[n]) { seen[n] = 1; q.push(n); blob.push(n); } }
+        if (blob.length < fw * fh * .006) blob.forEach(j => cover[j] = 1);
+      }
+    }
+    // soft full-size mask
     const c = document.createElement("canvas"); c.width = fw; c.height = fh;
     const cx = c.getContext("2d"), im = cx.createImageData(fw, fh);
-    for (let i = 0; i < m.length; i++) { im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = 255; im.data[i * 4 + 3] = m[i] * 255; }
+    for (let i = 0; i < cover.length; i++) { im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = 255; im.data[i * 4 + 3] = cover[i] * 255; }
     cx.putImageData(im, 0, 0);
     const big = document.createElement("canvas"); big.width = P.W; big.height = P.H;
     const bx = big.getContext("2d"); bx.imageSmoothingQuality = "high";
-    bx.filter = `blur(${Math.max(1, P.W / 400)}px)`; bx.drawImage(c, 0, 0, P.W, P.H);
+    bx.filter = `blur(${Math.max(1, P.W / 500)}px)`; bx.drawImage(c, 0, 0, P.W, P.H);
     const bd = bx.getImageData(0, 0, P.W, P.H).data, pm = new Float32Array(P.W * P.H);
-    for (let i = 0; i < pm.length; i++) pm[i] = Math.min(1, bd[i * 4 + 3] / 255 * 1.6); // full strength right up to the edge
-    // perspective: the floor's far edge is the highest row that still spans a good width
-    const rows = [];
-    for (let y = 0; y < fh; y++) { let l = -1, r = -1, k = 0; for (let x = 0; x < fw; x++) if (m[y * fw + x]) { if (l < 0) l = x; r = x; k++; } rows.push({ l, r, k }); }
-    const maxK = Math.max(...rows.map(r => r.k));
-    let top = rows.findIndex(r => r.k > maxK * .35); if (top < 0) top = Math.floor(fh * .5);
-    const sx = P.W / fw, sy = P.H / fh, t = rows[top], backW = Math.max((t.r - t.l) * sx, P.W * .25), cxm = (t.l + t.r) / 2 * sx;
-    const frontW = Math.max(backW * 2.4, P.W * 1.3), ty = top * sy;
-    P.plane = [[cxm - backW / 2, ty], [cxm + backW / 2, ty], [cxm + frontW / 2, P.H * 1.05], [cxm - frontW / 2, P.H * 1.05]];
-    P.outline = P.plane.map(([x, y]) => [Math.min(P.W, Math.max(0, x)), Math.min(P.H, Math.max(0, y))]);
-    let firstRow = rows.findIndex(r => r.k > 0);
-    P.pmask = pm; P.pmaskTop = Math.max(0, firstRow) * sy;
+    for (let i = 0; i < pm.length; i++) pm[i] = Math.min(1, bd[i * 4 + 3] / 255 * 1.5);
+    P.pmask = pm;
+    P.pmaskTop = Math.min(...line.filter(isFinite)) * P.H / fh;
+    measure(under, fw, fh, line, ceil);
     return true;
+  }
+
+  // Size from the photo: a phone held about 5 ft off the ground with a ~65° lens. The floor's own perspective
+  // (how fast it narrows toward the back) tells us where the horizon is; from that every floor pixel has a real size.
+  const CAM_FT = 5, FOV = 65 * Math.PI / 180;
+  function measure(under, fw, fh, line, ceil) {
+    const s = P.W / fw, f = (Math.max(P.W, P.H) / 2) / Math.tan(FOV / 2) / s; // focal length in small-mask pixels
+    const topRow = Math.min(...line.filter(isFinite));
+    // horizon: floor width shrinks linearly to zero at the horizon, using rows where both side edges are in view
+    const ys = [], ws = [];
+    for (let y = Math.ceil(topRow) + 2; y < fh; y++) {
+      let l = -1, r = -1; for (let x = 0; x < fw; x++) if (under[y * fw + x]) { if (l < 0) l = x; r = x; }
+      if (l > fw * .03 && r < fw * .97 && r > l) { ys.push(y); ws.push(r - l); }
+    }
+    let y0 = null;
+    if (ys.length >= Math.max(6, fh * .02)) {
+      const n = ys.length, mx = ys.reduce((a, b) => a + b) / n, my = ws.reduce((a, b) => a + b) / n;
+      let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (ys[i] - mx) * (ws[i] - my); sxx += (ys[i] - mx) ** 2; }
+      const a = sxy / sxx; if (a > 0) y0 = mx - my / a;
+    }
+    const lineSorted = [...line].filter(isFinite).sort((a, b) => a - b), bRow = lineSorted[Math.floor(lineSorted.length * .2)] ?? topRow;
+    // best cue when the ceiling is in view: the back wall's floor and ceiling edges sit either side of the horizon,
+    // split by camera height (about 5 ft) over ceiling height (about 9 ft)
+    if (ceil) {
+      const cb = []; for (let x = 0; x < fw; x++) { for (let y = fh - 1; y >= 0; y--) if (ceil[y * fw + x]) { cb.push(y); break; } }
+      cb.sort((a, b) => a - b); const yc = cb[Math.floor(cb.length * .8)];
+      if (cb.length > fw * .3 && yc < bRow - fh * .1) y0 = ((9 - CAM_FT) * (bRow + .5) + CAM_FT * (yc + .5)) / 9;
+    }
+    // otherwise assume the phone is tipped down a little (about 8°), as people do when photographing a floor
+    if (y0 === null || y0 > topRow - fh * .01 || y0 < -fh * .3) {
+      y0 = Math.min(fh / 2 - f * Math.tan(8 * Math.PI / 180), topRow - fh * .04);
+      // a guessed tilt is only rough, so lean the distance to the back wall toward a typical garage depth (about 22 ft)
+      const zb = f * CAM_FT / Math.max(1, bRow + .5 - y0), z = Math.min(40, Math.max(16, Math.sqrt(zb * 22)));
+      y0 = bRow + .5 - f * CAM_FT / z;
+    }
+    const cx = fw / 2, ZMAX = 45;
+    let sq = 0, nearW = 0, maxW = 0;
+    for (let y = 0; y < fh; y++) { const dy = y + .5 - y0; if (dy <= 0) continue;
+      const Z = f * CAM_FT / dy; if (Z > ZMAX) continue;
+      let k = 0; for (let x = 0; x < fw; x++) if (under[y * fw + x]) k++;
+      sq += k * Z * Z / (f * dy);
+      maxW = Math.max(maxW, k * Z / f);
+      if (y === fh - 1) nearW = k * Z / f;
+    }
+    // the strip between the photographer's feet and the bottom of the photo isn't in the picture
+    sq += nearW * (f * CAM_FT / (fh - y0)) * .5;
+    // the sides of the floor close to the camera are out of frame too: the floor is as wide as it is at the back,
+    // and runs from where the photo was taken to the back wall
+    const depth = Math.min(ZMAX, f * CAM_FT / Math.max(1, bRow + .5 - y0)) + 1;
+    sq = Math.max(sq, maxW * depth);
+    // perspective for laying the finish: a floor rectangle seen from this camera
+    const Zb = f * CAM_FT / Math.max(1, topRow - y0), Zn = f * CAM_FT / (fh - y0) * .5, X = Math.max(6, Zb * (fw / 2) / f);
+    const pt = (Xw, Zw) => [(cx + f * Xw / Zw) * s, (y0 + f * CAM_FT / Zw) * s];
+    P.plane = [pt(-X, Zb), pt(X, Zb), pt(X, Zn), pt(-X, Zn)];
+    P.outline = P.plane.map(([x, y]) => [Math.min(P.W, Math.max(0, x)), Math.min(P.H, Math.max(0, y))]);
+    P.sqft = Math.round(Math.min(2500, Math.max(120, sq)) / 10) * 10;
   }
 
   const TJS = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/dist/transformers.min.js";
   const SEG_MODEL = "Xenova/segformer-b0-finetuned-ade-512-512";
   const FLOOR_LABELS = /^(floor|rug|road|sidewalk|earth|path|dirt track)$/;
-  let segPipe = null;
-  function loadSegmenter(onProgress) {
+  const OBJECT_LABELS = /^(car|truck|van|bus|person|cabinet|box|chest of drawers|shelf|table|desk|bicycle|minibike|refrigerator|washer|bookcase|chair|armchair|sofa|bench|barrel|basket|bag|ashcan|wardrobe|stool|counter|kitchen island|tank|bed)$/;
+  let segPipe = null, segProgress = 0;
+  const segListeners = new Set();
+  function loadSegmenter() {
     if (!segPipe) segPipe = (async () => {
       const T = await import(TJS);
       T.env.allowLocalModels = false;
-      return T.pipeline("image-segmentation", SEG_MODEL, { dtype: "q8", progress_callback: onProgress });
+      const files = {};
+      return T.pipeline("image-segmentation", SEG_MODEL, { dtype: "q8", progress_callback: p => {
+        if (p.status !== "progress" || !p.total) return;
+        files[p.file] = [p.loaded, p.total];
+        const v = Object.values(files), done = v.reduce((a, b) => a + b[0], 0), all = v.reduce((a, b) => a + b[1], 0);
+        segProgress = Math.round(done / all * 100); segListeners.forEach(fn => fn(segProgress));
+      } });
     })().catch(e => { segPipe = null; throw e; });
     return segPipe;
   }
+  // start downloading the floor finder as soon as someone opens the photo tab
+  document.getElementById("tab-photo").addEventListener("click", () => sampleReady.then(() => { if (!sampleFn) loadSegmenter().catch(() => {}); }));
   async function aiFloor(token) {
-    const seg = await loadSegmenter(p => {
-      if (token !== P.token || p.status !== "progress" || !/onnx/.test(p.file || "")) return;
-      statusEl.textContent = `Loading the AI floor finder (first photo only)… ${Math.round(p.progress || 0)}%`;
-    });
+    const onP = v => { if (token === P.token) statusEl.textContent = `Getting the AI floor finder ready (first photo only)… ${v}%`; };
+    segListeners.add(onP);
+    let seg; try { seg = await loadSegmenter(); } finally { segListeners.delete(onP); }
     if (token !== P.token) return false;
-    statusEl.textContent = "The AI is finding every part of your floor…";
+    statusEl.textContent = "The AI is finding every part of your floor and measuring it…";
     const s = Math.min(1, 512 / Math.max(P.W, P.H)), c = document.createElement("canvas");
     c.width = Math.round(P.W * s); c.height = Math.round(P.H * s);
     c.getContext("2d").drawImage(P.img, 0, 0, c.width, c.height);
     const parts = await seg(c.toDataURL("image/jpeg", .9));
     if (token !== P.token) return false;
-    const floors = parts.filter(p => FLOOR_LABELS.test(p.label));
+    const floors = parts.filter(p => FLOOR_LABELS.test(p.label)), objs = parts.filter(p => OBJECT_LABELS.test(p.label)), ceils = parts.filter(p => p.label === "ceiling");
     if (!floors.length) return false;
-    const { width: mw, height: mh } = floors[0].mask, m = new Uint8Array(mw * mh);
-    for (const f of floors) { const md = f.mask.data, ch = f.mask.channels || 1; for (let i = 0; i < m.length; i++) if (md[i * ch] > 127) m[i] = 1; }
-    return useMask(cleanMask(m, mw, mh, 1), mw, mh);
+    const { width: mw, height: mh } = floors[0].mask, m = new Uint8Array(mw * mh), o = new Uint8Array(mw * mh);
+    const add = (list, into) => { for (const f of list) { const md = f.mask.data, ch = f.mask.channels || 1; for (let i = 0; i < into.length; i++) if (md[i * ch] > 127) into[i] = 1; } };
+    add(floors, m); add(objs, o);
+    let cm = null; if (ceils.length) { cm = new Uint8Array(mw * mh); add(ceils, cm); }
+    return applyFloor(m, mw, mh, o, cm);
   }
   async function findFloor() {
     const token = P.token = (P.token || 0) + 1;
     statusEl.className = "ai-status working";
     statusEl.textContent = "Generating your new floor…";
-    const fallback = () => { const cf = colorFloor(); if (!useMask(cf.m, cf.fw, cf.fh)) { guessFloor(); P.pmask = null; } };
+    P.sqft = 0;
     let ok = false;
-    try { ok = await Promise.race([aiFloor(token), new Promise((_, no) => setTimeout(() => no(new Error("slow")), 60000))]); } catch (e) {}
+    try { ok = await aiFloor(token); } catch (e) { console.warn("AI floor finder unavailable:", e); }
     if (token !== P.token) return;
-    if (!ok) fallback();
+    if (!ok) { const cf = colorFloor(); if (!applyFloor(cf.m, cf.fw, cf.fh, null)) { guessFloor(); P.pmask = null; } }
     P.showBefore = false; syncBA(); paintFloor();
+    const sq = document.getElementById("p-sqft");
+    if (P.sqft && !sq.dataset.typed) sq.value = P.sqft;
     statusEl.className = "ai-status ok";
-    statusEl.textContent = ok
-      ? "Your new floor is ready. Pick any color to see it instantly, and type in your floor size to finish the quote."
-      : "Here's your new floor. Pick any color to see it instantly, and type in your floor size to finish the quote.";
+    statusEl.textContent = P.sqft
+      ? `Your new floor is ready. From your photo it's about ${P.sqft.toLocaleString()} sq ft (roughly ${Math.round(P.sqft * .8 / 10) * 10} to ${Math.round(P.sqft * 1.2 / 10) * 10}). Change the size if you know it, and we'll measure exactly on site. Pick any color to see it instantly.`
+      : "Your new floor is ready. Pick any color to see it instantly, and type in your floor size to finish the quote.";
+    updatePhotoQuote();
   }
 
   function loadPhoto(img, blob) {
@@ -1735,7 +1841,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     use.disabled = false;
     P.quote = { sys: P.sys, sqft, cond, color: pColorName(), ...e };
   }
-  document.getElementById("p-sqft").addEventListener("input", updatePhotoQuote);
+  document.getElementById("p-sqft").addEventListener("input", e => { e.target.dataset.typed = e.target.value ? "1" : ""; updatePhotoQuote(); });
   document.getElementById("p-cond").addEventListener("change", updatePhotoQuote);
   document.getElementById("pe-use").addEventListener("click", () => sendToForm(P.quote, P.notes ? ` Photo notes: ${P.notes}` : " Sent from the photo quote."));
 
