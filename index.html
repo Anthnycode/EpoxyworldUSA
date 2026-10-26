@@ -660,6 +660,13 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
                 <button type="button" data-sys="solid" aria-pressed="false">Solid</button>
               </div>
             </div>
+            <div class="field" id="p-cov-field" hidden><label>Chip coverage</label>
+              <div class="seg" role="group" aria-label="Chip coverage" id="p-cov">
+                <button type="button" data-cov="light" aria-pressed="false">Light</button>
+                <button type="button" data-cov="medium" aria-pressed="false">Medium</button>
+                <button type="button" data-cov="full" aria-pressed="true">Full broadcast</button>
+              </div>
+            </div>
             <div class="field"><label>Color <span id="p-color-name" class="swatch-count"></span></label><div class="swatches small" id="p-swatches"></div></div>
             <button type="button" class="btn btn-chrome" id="p-analyze" disabled>Generate again with AI</button>
             <p class="ai-status" id="p-status" role="status"></p>
@@ -1422,7 +1429,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   // ---------- Photo quote + AI floor preview ----------
   // Upload a photo and the AI finds the whole floor (around cars and clutter), then the chosen finish
   // is laid over every bit of it in perspective, lit by the room's own light.
-  const P = { sys: "metallic", key: "storm", img: null, blob: null, plane: null, outline: null, W: 0, H: 0, base: null, shade: null, after: null, showBefore: false };
+  const P = { sys: "metallic", key: "storm", cov: "full", img: null, blob: null, plane: null, outline: null, W: 0, H: 0, base: null, shade: null, after: null, showBefore: false };
   const pc = document.getElementById("p-canvas"), px = pc.getContext("2d", { willReadFrequently: true });
   const statusEl = document.getElementById("p-status"), analyzeBtn = document.getElementById("p-analyze");
   let sampleFn = null;
@@ -1450,7 +1457,12 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     });
     pNames(); pump();
   }
-  function pColorName() { return P.key === "custom" ? `custom blend (${customBlend})` : PALETTES[P.sys][P.key].name; }
+  function pColorName() { return (P.key === "custom" ? `custom blend (${customBlend})` : PALETTES[P.sys][P.key].name) + (P.sys === "flake" ? `, ${COVERAGE[P.cov][1].toLowerCase()}` : ""); }
+  function syncPCov() {
+    document.getElementById("p-cov-field").hidden = P.sys !== "flake";
+    document.querySelectorAll("#p-cov button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.cov === P.cov)));
+  }
+  document.querySelectorAll("#p-cov button").forEach(b => b.addEventListener("click", () => { P.cov = b.dataset.cov; syncPCov(); paintFloor(); updatePhotoQuote(); }));
   function pNames() { document.getElementById("p-color-name").textContent = "· " + (P.key === "custom" ? "Your custom blend" : PALETTES[P.sys][P.key].name); }
   function drawCustomSwatch(c) {
     const off = blendCanvas(((LW - 220) / 2) | 0, LH - 220, 220, 220, BASES[mix.base][1], (mix.pigs.length ? mix.pigs : [0]).map(i => PIGMENTS[i][1]));
@@ -1459,7 +1471,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   document.querySelectorAll("#p-sys button").forEach(b => b.addEventListener("click", () => {
     P.sys = b.dataset.sys; P.key = P.sys === "metallic" && customBlend ? "custom" : Object.keys(PALETTES[P.sys])[0];
     document.querySelectorAll("#p-sys button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
-    pSwatches(); paintFloor(); updatePhotoQuote();
+    syncPCov(); pSwatches(); paintFloor(); updatePhotoQuote();
   }));
   // opening the photo tab picks up a blend made in the studio
   document.getElementById("tab-photo").addEventListener("click", () => {
@@ -1468,16 +1480,81 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   });
 
   // finish textures, laid flat (top-down) so they can be warped onto any floor
+  // A whole floor's metallic pour, generated at floor size: the resin's flow (a smooth noise field pulled through
+  // itself twice, the way poured resin folds), banded into the blend's colors with thin bright lacing between
+  // flows, using the same color recipe as the swatches. It wraps seamlessly.
+  function pourTexture(ctx, S, baseHex, pigHexes, seed, bold) {
+    const r = rng(seed), grids = new Map();
+    const grid = (per, k) => { const id = per + ":" + k; if (!grids.has(id)) { const g = new Float32Array(per * per); for (let i = 0; i < g.length; i++) g[i] = r(); grids.set(id, g); } return grids.get(id); };
+    const vn = (per, k, x, y) => { // periodic value noise, x and y in 0..1
+      const g = grid(per, k), fx = x * per, fy = y * per, ix = Math.floor(fx), iy = Math.floor(fy);
+      let ux = fx - ix, uy = fy - iy; ux = ux * ux * ux * (ux * (ux * 6 - 15) + 10); uy = uy * uy * uy * (uy * (uy * 6 - 15) + 10);
+      const x0 = ((ix % per) + per) % per, y0 = ((iy % per) + per) % per, x1 = (x0 + 1) % per, y1 = (y0 + 1) % per;
+      const a = g[y0 * per + x0], b = g[y0 * per + x1], c = g[y1 * per + x0], d = g[y1 * per + x1];
+      return a + (b - a) * ux + (c - a + (a - b + d - c) * ux) * uy;
+    };
+    const fbm = (k, x, y, base, oct) => { let v = 0, amp = 1, sum = 0; for (let o = 0; o < oct; o++) { v += amp * vn(base << o, k * 16 + o, x, y); sum += amp; amp *= .5; } return v / sum; };
+    const wrap = v => v - Math.floor(v);
+    // smooth flow fields on a coarse grid
+    const G = 256, qx = new Float32Array(G * G), qy = new Float32Array(G * G), wx = new Float32Array(G * G), wy = new Float32Array(G * G), sl = new Float32Array(G * G);
+    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+      const x = i / G, y = j / G, k = j * G + i;
+      qx[k] = fbm(1, x, y, 2, 4); qy[k] = fbm(2, x, y, 2, 4);
+      const px = wrap(x + .6 * qx[k]), py = wrap(y + .6 * qy[k]);
+      wx[k] = fbm(3, px, py, 2, 5); wy[k] = fbm(4, px, py, 2, 5);
+      sl[k] = fbm(6, wrap(x + .5 * qx[k]), wrap(y + .5 * qy[k]), 2, 4);
+    }
+    const at = (arr, x, y) => { const fx = x * G, fy = y * G, i = Math.floor(fx), j = Math.floor(fy), ax = fx - i, ay = fy - j;
+      const i0 = i % G, j0 = j % G, i1 = (i0 + 1) % G, j1 = (j0 + 1) % G;
+      return (arr[j0 * G + i0] * (1 - ax) + arr[j0 * G + i1] * ax) * (1 - ay) + (arr[j1 * G + i0] * (1 - ax) + arr[j1 * G + i1] * ax) * ay; };
+    const M = S, nv = new Float32Array(M * M), sv = new Float32Array(M * M);
+    for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
+      const u = x / M, v = y / M, k = y * M + x;
+      nv[k] = fbm(5, wrap(u + .8 * at(wx, u, v)), wrap(v + .8 * at(wy, u, v)), 2, 6);
+      sv[k] = at(sl, u, v);
+    }
+    const pct = (arr, a, b) => { const s2 = []; for (let i = 0; i < arr.length; i += 97) s2.push(arr[i]); s2.sort((p, q) => p - q); return [s2[Math.floor(s2.length * a)], s2[Math.floor(s2.length * b)]]; };
+    const [nlo, nhi] = pct(nv, .02, .98), [slo, shi] = pct(sv, .02, .98);
+    const B = hex(baseHex), mixc = (a, b, k) => a.map((v, c) => v + (b[c] - v) * k);
+    const ramps = pigHexes.map(ph => { const P = hex(ph); return [B.map(v => v * .35), B, mixc(B, P, .45).map(v => v * .92), P, mixc(P, [255, 255, 255], .6)]; });
+    const n = ramps.length, sigma = n === 1 ? 1 : .95 / n, wts = new Float32Array(n), freq = Math.PI * (bold ? 3.2 : 4.5);
+    const img = ctx.createImageData(M, M), d = img.data;
+    for (let k = 0; k < M * M; k++) {
+      const nn = Math.min(1, Math.max(0, (nv[k] - nlo) / (nhi - nlo))), s = Math.min(1, Math.max(0, (sv[k] - slo) / (shi - slo)));
+      const bands = .5 + .5 * Math.sin(nn * freq), lace = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(nn * freq + 1.1))), 4);
+      const t = Math.min(1, .12 + .62 * Math.pow(bands, 1.8) + .22 * lace);
+      let sum = 0;
+      for (let i = 0; i < n; i++) { const z = (s - (i + .5) / n) / sigma; wts[i] = Math.exp(-z * z); sum += wts[i]; }
+      const f = t * 4, si = Math.min(3, Math.floor(f)), uu = f - si;
+      for (let c = 0; c < 3; c++) { let v = 0; for (let i = 0; i < n; i++) { const rr = ramps[i]; v += (rr[si][c] + (rr[si + 1][c] - rr[si][c]) * uu) * wts[i]; } d[k * 4 + c] = v / sum; }
+      d[k * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
   const flatCache = new Map();
-  function flatTexture(sys, key) {
-    const id = sys + key + (key === "custom" ? customBlend : ""); if (flatCache.has(id)) return flatCache.get(id);
-    const S = 1024, c = document.createElement("canvas"); c.width = S; c.height = S;
-    const ctx = c.getContext("2d");
-    if (key === "custom") { const off = blendCanvas(((LW - LH) / 2) | 0, 0, LH, LH, BASES[mix.base][1], (mix.pigs.length ? mix.pigs : [0]).map(i => PIGMENTS[i][1])); ctx.drawImage(off, 0, 0, S, S); }
-    else if (sys === "metallic") { const p = PALETTES[sys][key], off = blendCanvas(((LW - LH) / 2) | 0, 0, LH, LH, p.base, p.pigs); ctx.imageSmoothingQuality = "high"; ctx.drawImage(off, 0, 0, S, S); }
-    else if (sys === "flake") flakeTex(ctx, S, S, PALETTES[sys][key], 9, 1.15);
-    else solidTex(ctx, S, S, PALETTES[sys][key], 5);
-    const t = { data: ctx.getImageData(0, 0, S, S).data, S, tile: sys === "metallic" ? 1 : sys === "flake" ? 3 : 1 };
+  function flatTexture(sys, key, cov) {
+    const id = sys + key + (key === "custom" ? customBlend : "") + (sys === "flake" ? cov : ""); if (flatCache.has(id)) return flatCache.get(id);
+    if (flatCache.size > 6) flatCache.delete(flatCache.keys().next().value);
+    const S = 2048, c = document.createElement("canvas"); c.width = S; c.height = S;
+    const ctx = c.getContext("2d"); ctx.imageSmoothingQuality = "high";
+    let ftPerTile;
+    if (sys === "metallic") {
+      if (key === "custom") pourTexture(ctx, S, BASES[mix.base][1], (mix.pigs.length ? mix.pigs : [0]).map(i => PIGMENTS[i][1]), 7 + mix.base * 13 + mix.pigs.join("").length, mix.design === "bold");
+      else pourTexture(ctx, S, PALETTES[sys][key].base, PALETTES[sys][key].pigs, [...key].reduce((a, ch) => a * 31 + ch.charCodeAt(0), 7) >>> 0, false);
+      ftPerTile = 14; // the pour's flows at true size (the texture wraps seamlessly)
+    } else if (sys === "flake") { flakeTex(ctx, S, S, PALETTES[sys][key], 9, 3.2, cov); ftPerTile = 4; } // chips about 1/4 to 1/2 in
+    else { solidTex(ctx, S, S, PALETTES[sys][key], 5); ftPerTile = 10; }
+    // mip pyramid: each level averages 2x2 of the one above
+    const levels = [{ d: ctx.getImageData(0, 0, S, S).data, S }];
+    while (levels[levels.length - 1].S > 8) {
+      const { d, S: s0 } = levels[levels.length - 1], s1 = s0 >> 1, o = new Uint8ClampedArray(s1 * s1 * 4);
+      for (let y = 0; y < s1; y++) for (let x = 0; x < s1; x++) for (let k = 0; k < 4; k++) {
+        const i = ((y * 2) * s0 + x * 2) * 4 + k;
+        o[(y * s1 + x) * 4 + k] = (d[i] + d[i + 4] + d[i + s0 * 4] + d[i + s0 * 4 + 4] + 2) >> 2;
+      }
+      levels.push({ d: o, S: s1 });
+    }
+    const t = { levels, ftPerTile };
     flatCache.set(id, t); return t;
   }
 
@@ -1607,6 +1684,17 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     const env = top.map((_, x) => { let v = Infinity; for (let d = -k1; d <= k1; d++) { const t = top[x + d]; if (t !== undefined && t < v) v = t; } return v; });
     const line = env.map((_, x) => { const w = []; for (let d = -k2; d <= k2; d++) { const t = env[x + d]; if (t !== undefined) w.push(t); }
       w.sort((a, b) => a - b); return w[w.length >> 1]; });
+    // a room's floor is a convex shape seen in perspective, so its far edge can't dip: take the convex line under
+    // the detected edge, which fills in reflections and glare the finder mistook for something else
+    const pts = []; for (let x = 0; x < fw; x++) if (isFinite(line[x])) pts.push([x, line[x]]);
+    const hull = [];
+    for (const p of pts) {
+      while (hull.length >= 2) { const [a, b2] = [hull[hull.length - 2], hull[hull.length - 1]];
+        if ((b2[0] - a[0]) * (p[1] - a[1]) - (b2[1] - a[1]) * (p[0] - a[0]) <= 0) hull.pop(); else break; }
+      hull.push(p);
+    }
+    for (let h = 0; h < hull.length - 1; h++) { const [x0, y0] = hull[h], [x1, y1] = hull[h + 1];
+      for (let x = x0; x <= x1; x++) line[x] = Math.min(line[x], y0 + (y1 - y0) * (x - x0) / Math.max(1, x1 - x0)); }
     // bridge short gaps where something blocks the view of the floor's edge
     for (let x = 0; x < fw; x++) if (!isFinite(line[x])) {
       let a = x - 1; while (a >= 0 && !isFinite(line[a])) a--;
@@ -1677,9 +1765,9 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     // otherwise assume the phone is tipped down a little (about 8°), as people do when photographing a floor
     if (y0 === null || y0 > topRow - fh * .01 || y0 < -fh * .3) {
       y0 = Math.min(fh / 2 - f * Math.tan(8 * Math.PI / 180), topRow - fh * .04);
-      // a guessed tilt is only rough, so lean the distance to the back wall toward a typical garage depth (about 22 ft)
-      const zb = f * CAM_FT / Math.max(1, bRow + .5 - y0), z = Math.min(40, Math.max(16, Math.sqrt(zb * 22)));
-      y0 = bRow + .5 - f * CAM_FT / z;
+      // a guessed tilt is too rough to measure depth from, so use a typical garage depth (about 22 ft) and
+      // measure the width against it
+      y0 = bRow + .5 - f * CAM_FT / 21;
     }
     const cx = fw / 2, ZMAX = 45;
     let sq = 0, nearW = 0, maxW = 0;
@@ -1697,9 +1785,12 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     const depth = Math.min(ZMAX, f * CAM_FT / Math.max(1, bRow + .5 - y0)) + 1;
     sq = Math.max(sq, maxW * depth);
     // perspective for laying the finish: a floor rectangle seen from this camera
-    const Zb = f * CAM_FT / Math.max(1, topRow - y0), Zn = f * CAM_FT / (fh - y0) * .5, X = Math.max(6, Zb * (fw / 2) / f);
+    // a square of floor, big enough to reach every visible corner, so one pour covers it without mirrored seams
+    const Zb = Math.min(ZMAX, f * CAM_FT / Math.max(1, topRow - y0)), Zn = f * CAM_FT / (fh - y0) * .9;
+    const side = Math.max(Zb - Zn, Zb * fw / f) * 1.05, X = side / 2;
+    P.planeFt = side;
     const pt = (Xw, Zw) => [(cx + f * Xw / Zw) * s, (y0 + f * CAM_FT / Zw) * s];
-    P.plane = [pt(-X, Zb), pt(X, Zb), pt(X, Zn), pt(-X, Zn)];
+    P.plane = [pt(-X, Zn + side), pt(X, Zn + side), pt(X, Zn), pt(-X, Zn)];
     P.outline = P.plane.map(([x, y]) => [Math.min(P.W, Math.max(0, x)), Math.min(P.H, Math.max(0, y))]);
     P.sqft = Math.round(Math.min(2500, Math.max(120, sq)) / 10) * 10;
   }
@@ -1777,7 +1868,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     const sd = sx.getImageData(0, 0, sw, sh).data, shade = new Float32Array(sw * sh);
     for (let i = 0; i < sw * sh; i++) shade[i] = (sd[i * 4] * .299 + sd[i * 4 + 1] * .587 + sd[i * 4 + 2] * .114) / 255;
     P.shade = { data: shade, w: sw, h: sh };
-    P.plane = P.outline = P.pmask = null; P.after = null;
+    P.plane = P.outline = P.pmask = P.refl = null; P.planeFt = 0; P.after = null;
     document.getElementById("p-drop").hidden = true;
     document.getElementById("p-stage").hidden = false;
     syncBA();
@@ -1788,40 +1879,62 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
     updatePhotoQuote();
   }
 
+  // where the floor meets the walls, column by column, from whichever mask is in use
+  function maskLine(mask) {
+    const { W, H } = P, L = new Float32Array(W).fill(-1);
+    for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) if (mask[y * W + x] > .5) { L[x] = y; break; }
+    return L;
+  }
+  // the room, softly blurred, for reflections in the new floor
+  function reflSource() {
+    if (P.refl) return P.refl;
+    const c = document.createElement("canvas"); c.width = P.W; c.height = P.H;
+    const x = c.getContext("2d"); x.filter = `blur(${Math.max(1.5, P.W / 260)}px)`; x.drawImage(P.img, 0, 0, P.W, P.H);
+    return P.refl = x.getImageData(0, 0, P.W, P.H).data;
+  }
   function paintFloor() {
     if (!P.base || !P.plane) return;
     const { W, H } = P, out = new ImageData(new Uint8ClampedArray(P.base.data), W, H), o = out.data, b = P.base.data;
-    const tex = flatTexture(P.sys, P.key), td = tex.data, S = tex.S, tile = tex.tile;
-    const inv = invert3(squareToQuad(P.plane)), mask = floorMask();
-    const ys = P.pmask ? [P.pmaskTop] : P.outline.map(p => p[1]);
-    const x0 = 0, x1 = W - 1, y0 = Math.max(0, Math.floor(Math.min(...ys)) - 8), y1 = H - 1; // the mask decides what gets covered
-    // average light on the floor, so the lighting map brightens and darkens around it
+    const tex = flatTexture(P.sys, P.key, P.cov), lv = tex.levels, S0 = lv[0].S, NL = lv.length;
+    const inv = invert3(squareToQuad(P.plane)), mask = floorMask(), line = maskLine(mask), refl = reflSource();
+    // the plane spans P.planeFt feet (or about 20 ft when it came from elsewhere): repeat the finish at its real size
+    const tile = tex.ftPerTile ? Math.max(1, (P.planeFt || 20) / tex.ftPerTile) : 1;
     const sh = P.shade, shadeAt = (x, y) => sh.data[Math.min(sh.h - 1, (y / H * sh.h) | 0) * sh.w + Math.min(sh.w - 1, (x / W * sh.w) | 0)];
     let sum = 0, n = 0;
-    for (let y = y0; y <= y1; y += 6) for (let x = x0; x <= x1; x += 6) if (mask[y * W + x] > .5) { sum += shadeAt(x, y); n++; }
+    for (let y = 0; y < H; y += 6) for (let x = 0; x < W; x += 6) if (mask[y * W + x] > .5) { sum += shadeAt(x, y); n++; }
     const mean = n ? sum / n : .5;
-    const gloss = P.sys === "solid" ? .5 : P.sys === "metallic" ? .6 : .35;
-    // mirrored repeat (seamless) with bilinear filtering so the finish stays smooth up close
-    const mirror = v => { const m = ((v % 2) + 2) % 2; return m > 1 ? 2 - m : m; }; // one pour covers the floor; mirroring only past its edges
-    const S1 = S - 1, px4 = [0, 0, 0];
-    const sample = (u, v) => {
-      const fx = mirror(u) * S1, fy = mirror(v) * S1, ix = Math.min(S1 - 1, fx | 0), iy = Math.min(S1 - 1, fy | 0), ax = fx - ix, ay = fy - iy;
+    const matte = P.sys === "metallic" && P.key === "custom" && mix.top === "matte";
+    const reflK = matte ? .04 : P.sys === "metallic" ? .34 : P.sys === "solid" ? .3 : .22;
+    const gloss = matte ? .12 : P.sys === "solid" ? .5 : P.sys === "metallic" ? .6 : .35;
+    const mirror = P.sys === "metallic" ? v => v - Math.floor(v) : v => { const m = ((v % 2) + 2) % 2; return m > 1 ? 2 - m : m; };
+    const px4 = [0, 0, 0], pa = [0, 0, 0];
+    const bil = (L, u, v, into) => {
+      const { d, S } = lv[L], S1 = S - 1, fx = mirror(u) * S1, fy = mirror(v) * S1;
+      const ix = Math.min(S1 - 1, fx | 0), iy = Math.min(S1 - 1, fy | 0), ax = fx - ix, ay = fy - iy;
       const a = (iy * S + ix) * 4, b2 = a + 4, c2 = a + S * 4, d2 = c2 + 4;
-      for (let c = 0; c < 3; c++) {
-        const top = td[a + c] + (td[b2 + c] - td[a + c]) * ax, bot = td[c2 + c] + (td[d2 + c] - td[c2 + c]) * ax;
-        px4[c] = top + (bot - top) * ay;
-      }
-      return px4;
+      for (let c = 0; c < 3; c++) { const top = d[a + c] + (d[b2 + c] - d[a + c]) * ax, bot = d[c2 + c] + (d[d2 + c] - d[c2 + c]) * ax; into[c] = top + (bot - top) * ay; }
     };
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const uvAt = (x, y) => { const d = inv[6] * x + inv[7] * y + inv[8]; return [(inv[0] * x + inv[1] * y + inv[2]) / d * tile, (inv[3] * x + inv[4] * y + inv[5]) / d * tile]; };
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const a = mask[y * W + x]; if (a <= 0) continue;
-      const d = inv[6] * x + inv[7] * y + inv[8];
-      const u = (inv[0] * x + inv[1] * y + inv[2]) / d, v = (inv[3] * x + inv[4] * y + inv[5]) / d;
-      const tx = sample(u * tile, v * tile);
-      const k = Math.min(1.35, Math.max(.55, Math.pow(shadeAt(x, y) / mean, .8)));
+      const [u, v] = uvAt(x, y), [u1, v1] = uvAt(x + 1, y), [u2, v2] = uvAt(x, y + 1);
+      // how many texels this pixel covers -> which mip level (trilinear)
+      const fp = Math.max(Math.hypot(u1 - u, v1 - v), Math.hypot(u2 - u, v2 - v)) * S0;
+      const lod = Math.min(NL - 1.001, Math.max(0, Math.log2(Math.max(1, fp)))), L0 = lod | 0, t = lod - L0;
+      bil(L0, u, v, px4);
+      if (t > .01) { bil(L0 + 1, u, v, pa); for (let c = 0; c < 3; c++) px4[c] += (pa[c] - px4[c]) * t; }
+      const k = Math.min(1.3, Math.max(.6, Math.pow(shadeAt(x, y) / mean, .7)));
       const i = (y * W + x) * 4, bl = (b[i] * .299 + b[i + 1] * .587 + b[i + 2] * .114) / 255;
-      const spec = bl > .8 ? (bl - .8) * 5 * gloss * 255 : 0; // keep reflections of lights and windows
-      for (let c = 0; c < 3; c++) o[i + c] = b[i + c] * (1 - a) + Math.min(255, tx[c] * k + spec) * a;
+      const spec = bl > .88 ? (bl - .88) * 8 * gloss * 255 : 0; // the room's lights still shine in the new coat
+      // mirror image of the walls, strongest near the back where the floor is seen at a low angle
+      let rs = 0, ri = 0;
+      const Lx = line[x];
+      if (Lx >= 0) { const ys = Math.round(2 * Lx - y) - 2; if (ys >= 0 && mask[ys * W + x] < .5) { ri = (ys * W + x) * 4; rs = reflK * (.35 + .65 * Math.exp(-(y - Lx) / (H * .22))) * Math.min(1, ys / (H * .12)); } }
+      for (let c = 0; c < 3; c++) {
+        let v = px4[c] * k;
+        if (rs) v += (refl[ri + c] - v) * rs;
+        o[i + c] = b[i + c] * (1 - a) + Math.min(255, v + spec) * a;
+      }
     }
     P.after = out;
     show();
@@ -1881,7 +1994,7 @@ Rules:
       const f = r?.plane, pts = f && [f.backLeft, f.backRight, f.frontRight, f.frontLeft];
       const ol = Array.isArray(r?.outline) ? r.outline.filter(inRange) : [];
       if (pts && pts.every(inRange)) {
-        P.pmask = null;
+        P.pmask = null; P.planeFt = 0;
         P.plane = pts.map(([x, y]) => [Math.min(2, Math.max(-1, x)) * P.W, Math.min(2, Math.max(-1, y)) * P.H]);
         P.outline = ol.length >= 3 ? ol.map(([x, y]) => [Math.min(1, Math.max(0, x)) * P.W, Math.min(1, Math.max(0, y)) * P.H])
           : P.plane.map(([x, y]) => [Math.min(P.W, Math.max(0, x)), Math.min(P.H, Math.max(0, y))]);
