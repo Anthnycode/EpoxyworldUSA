@@ -1888,7 +1888,8 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   // A phone held about 5 ft up with a ~65° lens. The horizon comes from the back wall's floor and ceiling
   // edges when the ceiling shows, or from how fast the floor narrows toward the back; failing both, a typical
   // garage depth. Every floor pixel then has a real size.
-  const CAM_FT = 5, FOV = 65 * Math.PI / 180;
+  // TYPICAL_DEPTH_FT: back-wall distance used when the photo gives no depth cue (tuned on a 450 sq ft garage)
+  const CAM_FT = 5, FOV = 65 * Math.PI / 180, TYPICAL_DEPTH_FT = 24;
   function measure(F) {
     const { under, fw, fh, line, ceil } = F;
     const s = P.W / fw, f = (Math.max(P.W, P.H) / 2) / Math.tan(FOV / 2) / s;
@@ -1910,7 +1911,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
       cb.sort((a, b) => a - b); const yc = cb[Math.floor(cb.length * .8)];
       if (cb.length > fw * .3 && yc < bRow - fh * .1) { y0 = ((9 - CAM_FT) * (bRow + .5) + CAM_FT * (yc + .5)) / 9; how = "ceiling line"; }
     }
-    if (y0 === null || y0 > topRow - fh * .01 || y0 < -fh * .3) { y0 = bRow + .5 - f * CAM_FT / 21; how = "typical depth"; }
+    if (y0 === null || y0 > topRow - fh * .01 || y0 < -fh * .3) { y0 = bRow + .5 - f * CAM_FT / TYPICAL_DEPTH_FT; how = "typical depth"; }
     const cx = fw / 2, ZMAX = 45;
     let sq = 0, nearW = 0, maxW = 0;
     for (let y = 0; y < fh; y++) { const dy = y + .5 - y0; if (dy <= 0) continue;
