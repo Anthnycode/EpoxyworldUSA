@@ -2344,11 +2344,12 @@ void main() {
     const prompt = `You are helping an epoxy floor coating company show a customer their garage with a new floor, from the customer's photo.
 The image is ${P.W}x${P.H} pixels. Find the whole floor surface that would be coated.
 Reply with only JSON in exactly this shape:
-{"outline":[[x,y],[x,y]],"sqft_low":0,"sqft_high":0,"sqft_best":0,"space":"","condition":"good|fair|poor","notes":""}
+{"plane":{"backLeft":[x,y],"backRight":[x,y],"frontRight":[x,y],"frontLeft":[x,y]},"outline":[[x,y],[x,y]],"sqft_low":0,"sqft_high":0,"sqft_best":0,"space":"","condition":"good|fair|poor","notes":""}
 Rules:
 - Coordinates are fractions of the image width and height, origin at the top-left.
+- plane: the four corners of the full rectangular floor, back corners where the floor meets the far wall, front corners nearest the camera. Corners that are out of frame may go below 0 or above 1 so the rectangle keeps true perspective.
 - outline: 12 to 40 points tracing ALL of the visible floor in order, following the base of every wall exactly and going around anything sitting on the floor (cars, cabinets, boxes, shelves, people) so those stay uncovered. The floor almost always continues to the bottom edge of the photo, so run the outline along the bottom edge (y = 1) from corner to corner unless something blocks it.
-- Estimate floor area in square feet from scale cues (garage doors are about 8 or 16 ft wide, cars about 15 ft long, doors about 3 ft wide, a 2-car garage is usually 400 to 600 sq ft).
+- Estimate floor area in square feet from scale cues (garage doors are about 8 or 16 ft wide, cars about 15 ft long, doors about 3 ft wide, a 2-car garage is usually 400 to 600 sq ft). Include floor hidden under cars or out of frame if you can infer it.
 - condition: good = smooth and clean, fair = some cracks or stains, poor = heavy cracking, pitting or an old peeling coating.
 - notes: one short sentence about anything that affects the job (cracks, stains, clutter to move). Plain words.`;
     try {
