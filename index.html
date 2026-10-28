@@ -1495,7 +1495,10 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   //  4. material  a flat, floor-scale texture made differently per system: metallic pour, vinyl chips, solid coat
   //  5. render    WebGL: the material laid on the floor plane with mipmapped, anisotropic filtering, lit by the
   //               photo's own light, reflecting the room, composited into the untouched photo (CPU fallback)
-  const MAX_SIDE = 2400;
+  // Phones (iPhone Safari especially) reload the page when it uses too much memory, often while the camera is
+  // open, so they get a smaller working photo, smaller textures and the small floor-finder model
+  const LITE = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory || 8) <= 4;
+  const MAX_SIDE = LITE ? 1400 : 2400, MAT_SIZE = LITE ? 1024 : 2048;
   const P = { sys: "metallic", key: "storm", cov: "full", img: null, blob: null, W: 0, H: 0, base: null, lum: null, shade: null,
     auto: null, mask: null, line: null, plane: null, planeFt: 0, sqft: 0, after: null, showBefore: false, token: 0, rtoken: 0,
     source: "", conf: [], seg: null, editC: null, editing: false, timings: {} };
@@ -1552,7 +1555,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   document.getElementById("tab-photo").addEventListener("click", () => {
     if (customBlend && P.sys === "metallic" && mix.mode === "mix") P.key = "custom";
     pSwatches(); paintFloor(); updatePhotoQuote();
-    sampleReady.then(() => { if (!sampleFn) loadSegmenter().catch(() => {}); });
+    sampleReady.then(() => { if (!sampleFn && !LITE) loadSegmenter().catch(() => {}); });
   });
 
   // ---------- 4. Materials: flat, floor-scale textures (feet per texture repeat in ftPerTile) ----------
@@ -1673,9 +1676,9 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   const matCache = new Map();
   function material(sys, key, cov) {
     const id = sys + key + (key === "custom" ? customBlend : "") + (sys === "flake" ? cov : ""); if (matCache.has(id)) return matCache.get(id);
-    if (matCache.size > 6) matCache.delete(matCache.keys().next().value);
+    if (matCache.size > (LITE ? 2 : 6)) matCache.delete(matCache.keys().next().value);
     const t0 = performance.now();
-    const S = sys === "solid" ? 512 : 2048, c = document.createElement("canvas"); c.width = c.height = S;
+    const S = sys === "solid" ? 512 : MAT_SIZE, c = document.createElement("canvas"); c.width = c.height = S;
     const ctx = c.getContext("2d"); let ftPerTile;
     if (sys === "metallic") {
       if (key === "custom") metallicMaterial(ctx, S, BASES[mix.base][1], (mix.pigs.length ? mix.pigs : [0]).map(i => PIGMENTS[i][1]), 7 + mix.base * 13 + mix.pigs.reduce((a, b) => a * 7 + b, 1), mix.design === "bold");
@@ -1857,7 +1860,7 @@ footer { border-top: 1px solid var(--line); padding-block: 48px; }
   // AI segmentation, in the visitor's browser. SegFormer-B2 is far more accurate at room boundaries than B0;
   // B0 is the lighter backup if B2 can't load. WebGPU when available, otherwise WebAssembly.
   const TJS = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/dist/transformers.min.js";
-  const SEG_MODELS = ["Xenova/segformer-b2-finetuned-ade-512-512", "Xenova/segformer-b0-finetuned-ade-512-512"];
+  const SEG_MODELS = LITE ? ["Xenova/segformer-b0-finetuned-ade-512-512"] : ["Xenova/segformer-b2-finetuned-ade-512-512", "Xenova/segformer-b0-finetuned-ade-512-512"];
   const FLOOR_LABELS = /^(floor|rug|road|sidewalk|earth|path|dirt track)$/;
   const OBJECT_LABELS = /^(column|pole|stairs|step|railing|car|truck|van|bus|person|cabinet|box|chest of drawers|shelf|table|desk|bicycle|minibike|refrigerator|washer|bookcase|chair|armchair|sofa|bench|barrel|basket|bag|ashcan|wardrobe|stool|counter|kitchen island|tank|bed|plant|pot|bucket|crt screen|stove|dishwasher|ottoman|case|bulletin board)$/;
   let segPipe = null, segModel = "", segProgress = 0;
