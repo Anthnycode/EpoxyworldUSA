@@ -294,7 +294,18 @@ label.check input { width: 18px; height: 18px; accent-color: #e6eaef; }
 .stage-busy { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 999px; background: rgba(11,13,16,.85); color: #e9edf2; font-size: 14px; white-space: nowrap; max-width: calc(100% - 24px); }
 .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; animation: spin .9s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.edit-bar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border-radius: 12px; background: rgba(11,13,16,.88); }
+.edit-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--ink); }
+.edit-bar[hidden] { display: none; }
+#p-stage { scroll-margin-top: 90px; }
+#p-stage.editing canvas { max-height: 62vh; }
+@media (max-width: 600px) {
+  .edit-bar { gap: 8px 6px; padding: 10px; }
+  .edit-tip { font-size: 12px; }
+  .edit-bar .seg-2 { flex: 1 1 100%; }
+  .brush-size { flex: 1 1 100%; }
+  .brush-size input { flex: 1; width: auto; }
+  .edit-bar .btn-sm { flex: 1; }
+}
 .edit-bar .seg { width: auto; }
 .edit-tip { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--mist); }
 .brush-size { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--mist); }
@@ -2241,6 +2252,7 @@ void main() {
     P.editing = true; stageEl.classList.add("editing"); document.getElementById("p-edit").hidden = false;
     document.querySelector("#p-stage .ba-bar").hidden = true;
     drawEditor();
+    if (matchMedia("(max-width: 600px)").matches) stageEl.scrollIntoView({ block: "start", behavior: "smooth" });
   }
   function drawEditor() {
     const { W, H } = P;
